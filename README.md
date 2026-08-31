@@ -14,9 +14,11 @@ Both fixes are merged into a single DLL because the game only has one `d3d8.dll`
 If you're running dgVoodoo2, rename its d3d8.dll to d3d8_dgvoodoo.dll.
 Otherwise (some other wrapper, or you just want the game's own d3d8.dll kept in the chain), rename it to d3d8_orig.dll.
 
-If neither renamed file is found, Dagnyfix falls back to the real d3d8.dll in System32 — which works, but means whatever you had installed before is no longer in the chain at all.
+If neither renamed file is found, Dagnyfix falls back to the real d3d8.dll in System32 - which works, but means whatever you had installed before is no longer in the chain at all.
+
 2. Drop `dagnyfix`'s built `d3d8.dll` in its place.
-3. Launch and play. Both fixes are active automatically - no config needed.
+3. 
+4. Launch and play. Both fixes are active automatically - no config needed.
 
 ## Build
 
