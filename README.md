@@ -17,7 +17,7 @@ Otherwise (some other wrapper, or you just want the game's own d3d8.dll kept in 
 If neither renamed file is found, Dagnyfix falls back to the real d3d8.dll in System32 - which works, but means whatever you had installed before is no longer in the chain at all.
 
 2. Drop `dagnyfix`'s built `d3d8.dll` in its place.
-3. 
+
 4. Launch and play. Both fixes are active automatically - no config needed.
 
 ## Build
