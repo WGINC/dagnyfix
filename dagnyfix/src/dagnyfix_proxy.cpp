@@ -19,28 +19,36 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 //
-// Dagnyfix - merges SpectralFix's Windower aura fix and the standalone
-// flare depth-offset fix into one d3d8.dll proxy, so it's one DLL instead of
-// two you'd have to choose between or chain.
+// Dagnyfix - merges SpectralFix's Windower aura fix, the standalone flare
+// depth-offset fix, and the ground-decal aspect/zoom fix into one d3d8.dll
+// proxy, so it's one DLL instead of three you'd have to choose between or
+// chain.
 //
 // =============================================================================
 // Merge notes / why this is safe
 // =============================================================================
 //
-// Same "d3d8.dll" slot-takeover both source tools used (full history in
-// windower/src/d3d8_proxy.cpp and flarefix/flarefix_proxy.cpp). We hook
-// CreateDevice once and hand the real device to both fixes, in this order:
+// Same "d3d8.dll" slot-takeover all three source tools used (full history in
+// windower/src/d3d8_proxy.cpp, flarefix/flarefix_proxy.cpp, and
+// decalfix/README.md). We hook CreateDevice once and hand the real device to
+// all three fixes, in this order:
 //
 //   1. attach_flare_hooks() FIRST - installs the flare hooks (SetRenderState,
 //      DrawPrimitive, SetStreamSource, Present) and reads the real
 //      DrawPrimitiveUP pointer without hooking it. Order matters here, see below.
 //   2. WindowerCore::attach_device() (aura fix, unmodified) SECOND - hooks
 //      CreateTexture, SetTexture, DrawPrimitiveUP, Present.
+//   3. attach_decal_hooks() THIRD - hooks Reset, SetTexture, DrawPrimitive,
+//      DrawIndexedPrimitive, Present, and reads the real GetTransform/
+//      SetTransform pointers without hooking them.
 //
-// Slot overlap between the two fixes is nearly nil:
+// Slot overlap across the three fixes:
 //   Flare: SetRenderState(50), DrawPrimitive(70), SetStreamSource(83)
 //   Aura:  CreateTexture(20), SetTexture(61)
-// They collide on two slots: DrawPrimitiveUP(72) and Present(15).
+//   Decal: Reset(14), SetTexture(61), DrawPrimitive(70), DrawIndexedPrimitive(71)
+// Collisions: DrawPrimitiveUP(72) between flare/aura; SetTexture(61) between
+// aura/decal; DrawPrimitive(70) between flare/decal; Present(15) across all
+// three.
 //
 //   - DrawPrimitiveUP: aura fix hooks this (its quads go through here and get
 //     corrected in flight). Flare fix never hooks it - just needs the raw
@@ -48,18 +56,41 @@
 //     the game's vertex buffer. THIS is why the order above matters: we grab
 //     that pointer before the aura fix's hook goes on the slot, so the flare
 //     fix always calls the true DrawPrimitiveUP and its synthetic draws never
-//     get run back through the aura fix's selector/correction logic.
-//   - Present: both fixes just want a once-per-frame tick (counter + periodic
-//     log line), nobody inspects or alters the args. Plain hook chaining
-//     handles this fine - whoever hooks second wraps whoever hooked first,
-//     both bodies still fire once a frame. No ordering requirement here.
+//     get run back through the aura fix's selector/correction logic. Decal
+//     fix never touches this slot at all.
+//   - SetTexture: decal fix hooks this AFTER the aura fix does (attach order
+//     above), so decal's "original" for this slot is the aura fix's own
+//     hook, not the raw real SetTexture - a normal, harmless chain. Decal
+//     only observes which texture landed in stages 0/1 after forwarding the
+//     call on; it never alters the texture argument, so there's nothing for
+//     the two fixes to step on each other over.
+//   - DrawPrimitive: decal fix hooks this AFTER the flare fix does, so
+//     decal's "original" is the flare fix's hook. Decal wraps the WHOLE
+//     call - reads WORLD, scales it if this draw's texture was confirmed a
+//     decal, calls through original (which runs flare's own signature check
+//     and either calls the real DrawPrimitive or bypasses to
+//     DrawPrimitiveUP for a matched glow billboard), then restores WORLD.
+//     That's correct regardless of which path flare takes internally,
+//     because decal is only holding a D3D8 device-state scope (WORLD) open
+//     around the call, not touching any buffer contents. The two fixes'
+//     match domains are also disjoint in practice - flare matches by
+//     render-state signature + 36-byte-stride vertex buffers (<=8
+//     vertices), decal by VIEW-matrix signature + a completely different
+//     texture format - so a draw call matching both at once isn't a
+//     realistic case, just a safe one if it ever happened.
+//   - Present: all three fixes just want a once-per-frame tick (counter +
+//     periodic log line), nobody inspects or alters the args. Plain hook
+//     chaining handles this fine - whoever hooks last wraps everyone before
+//     them, every body still fires once a frame. No ordering requirement here.
 //
-// Nothing about either fix's actual correction logic changed for this merge:
-// the aura side is WindowerCore verbatim, the flare side below is the same
+// Nothing about any fix's actual correction logic changed for this merge:
+// the aura side is WindowerCore verbatim, the flare side is the same
 // signature-match/nudge logic as flarefix v3.1 (0.4 nudge, tuned against
-// real playtests - see flarefix/README.md). Only the shell (backend
-// loading, CreateDevice hook, exports, DllMain) is actually shared, since
-// there's only one real d3d8 backend and one CreateDevice call regardless.
+// real playtests - see flarefix/README.md), and the decal side is the same
+// VIEW-signature/WORLD-rescale logic as decalfix (see decalfix/README.md).
+// Only the shell (backend loading, CreateDevice hook, exports, DllMain) is
+// actually shared, since there's only one real d3d8 backend and one
+// CreateDevice call regardless.
 //
 // =============================================================================
 // Flare fix summary (full history: ../flarefix/README.md, ../diagnostics/README.md)
@@ -78,10 +109,34 @@
 // (here) never touches the game's buffer: read-only lock, nudge a local
 // copy, resubmit that copy via DrawPrimitiveUP. No race. See the slot-overlap
 // note above for how that interacts with the aura fix's own DrawPrimitiveUP hook.
+//
+// =============================================================================
+// Decal fix summary (full history: ../decalfix/README.md)
+// =============================================================================
+//
+// Bug: ground-effect decals (avatar summoning pentagrams, ground-targeted
+// spell circles, certain NPC ground effects) render at the wrong size and
+// the wrong aspect ratio - stretched into an ellipse on non-square displays,
+// and swelling or shrinking as the camera zooms instead of holding still on
+// the ground. Root cause: these decals are drawn with a fixed, canonical
+// top-down VIEW matrix combined with the scene's ordinary perspective
+// PROJECTION, so their size tracks camera FOV directly and world-X gets
+// squished by 1/aspect.
+//
+// Fix: identify a decal draw two ways at once (exact VIEW-matrix signature
+// AND a small/DXT3-compressed bound texture - neither signal is reliable
+// alone), cache that texture's identity so later draws skip straight to a
+// pointer check, then for a matched draw scale the WORLD matrix's
+// upper-left 3x3 block to cancel both the FOV-tracking and the aspect
+// squish, issue the real draw, and restore WORLD immediately after. Ported
+// and hardened from an earlier prototype that proved the technique but
+// wasn't written to a standard worth merging as-is - see decalfix/README.md
+// for the full list of what changed.
 
 #include "../../windower/src/windower_core.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -490,7 +545,516 @@ namespace
     }
 
     // =====================================================================
-    // CreateDevice hook - hands the real device to both fixes, in order.
+    // Decal fix. Everything here is prefixed kDecal/gDecal/hook_decal_ to
+    // keep it obviously separate from the other two fixes. Ported and
+    // hardened from an earlier prototype - see decalfix/README.md for the
+    // bug, the fix, and what changed from that prototype.
+    // =====================================================================
+
+    using DecalResetFn = HRESULT(__stdcall*)(IDirect3DDevice8*, D3DPRESENT_PARAMETERS*);
+    using DecalSetTextureFn = HRESULT(__stdcall*)(IDirect3DDevice8*, DWORD, IDirect3DBaseTexture8*);
+    using DecalDrawPrimitiveFn = HRESULT(__stdcall*)(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, UINT);
+    using DecalDrawIndexedPrimitiveFn = HRESULT(__stdcall*)(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, UINT, UINT, UINT);
+    using DecalGetTransformFn = HRESULT(__stdcall*)(IDirect3DDevice8*, D3DTRANSFORMSTATETYPE, D3DMATRIX*);
+    using DecalSetTransformFn = HRESULT(__stdcall*)(IDirect3DDevice8*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
+    using DecalPresentFn = HRESULT(__stdcall*)(IDirect3DDevice8*, const RECT*, const RECT*, HWND, const RGNDATA*);
+
+    // Fixed D3D8 ABI slots. Reset and DrawIndexedPrimitive are exclusively
+    // ours; SetTexture and DrawPrimitive chain through the aura and flare
+    // fixes' own hooks respectively (see header note); GetTransform/
+    // SetTransform are read once, never hooked.
+    constexpr uint32_t kDecalResetSlot = 14;
+    constexpr uint32_t kDecalSetTextureSlot = 61;
+    constexpr uint32_t kDecalDrawPrimitiveSlot = 70;
+    constexpr uint32_t kDecalDrawIndexedPrimitiveSlot = 71;
+    constexpr uint32_t kDecalPresentSlot = 15;
+    constexpr uint32_t kDecalGetTransformSlot = 38; // read once at attach, never hooked
+    constexpr uint32_t kDecalSetTransformSlot = 37; // read once at attach, never hooked
+
+    // Observed canonical decal VIEW, row-major:
+    //   row0 = [-1, 0, 0, 0]   X flipped
+    //   row1 = [ 0, 0,-1, 0]   Y/Z swapped
+    //   row2 = [ 0,-1, 0, 0]
+    //   row3 = [ 0, 0,-2, 1]
+    // A looser "any top-down view" match also catches zone shadow draws and
+    // corrupts them - the translation row is what tells them apart.
+    bool decal_matches_view_signature(const D3DMATRIX& m)
+    {
+        if (std::fabs(m._11) < 0.95F) return false;
+        if (std::fabs(m._22) > 0.05F) return false;
+        if (std::fabs(m._33) > 0.05F) return false;
+        if (std::fabs(m._23) < 0.95F && std::fabs(m._32) < 0.95F) return false;
+        if (std::fabs(m._41) > 0.1F) return false;
+        if (std::fabs(m._42) > 0.1F) return false;
+        if (std::fabs(m._43 + 2.0F) > 0.1F) return false;
+        return true;
+    }
+
+    // Decal textures observed so far: small (<=256 either dimension) and
+    // DXT3-compressed. An avatar's idle ground glow goes through this same
+    // draw pipeline but is uncompressed A8R8G8B8, which is how the two get
+    // told apart despite sharing everything else.
+    constexpr UINT kDecalMaxTextureDimension = 256;
+
+    // proj[5] (= cot(fovY/2), the standard aspect-independent FOV term) at
+    // the reference zoom level this was calibrated against. 0 disables the
+    // FOV cancel and applies kDecalUniformScale flat. Carried over from an
+    // earlier prototype's own observed value, not re-verified against this
+    // project's own playtest - see decalfix/README.md "Known limitations".
+    constexpr float kDecalFovReferenceProjScale = 1.529F;
+    constexpr float kDecalUniformScale = 1.0F;
+
+    constexpr uint32_t kDecalTextureCacheCapacity = 64;
+
+    constexpr uint64_t kDecalLogEveryMatchUpTo = 20;
+    constexpr uint64_t kDecalLogEveryNthMatchAfter = 6000;
+    constexpr uint64_t kDecalStatusLineEveryNFrames = 600;
+    constexpr uint64_t kDecalMaxLogBytes = 8ULL * 1024 * 1024;
+
+    // Two of these run side by side: one for textures confirmed to be
+    // decals, one for textures confirmed NOT to be. Real circular buffer -
+    // O(1) insert, oldest entry silently overwritten once full.
+    template <uint32_t Capacity>
+    class DecalTextureIdentityCache
+    {
+    public:
+        bool Contains(IDirect3DBaseTexture8* texture) const
+        {
+            if (texture == nullptr)
+                return false;
+            for (uint32_t i = 0; i < count_; ++i)
+            {
+                if (entries_[i] == texture)
+                    return true;
+            }
+            return false;
+        }
+
+        void Add(IDirect3DBaseTexture8* texture)
+        {
+            if (texture == nullptr || Contains(texture))
+                return;
+            entries_[writeIndex_] = texture;
+            writeIndex_ = (writeIndex_ + 1) % Capacity;
+            if (count_ < Capacity)
+                ++count_;
+        }
+
+        void Clear()
+        {
+            entries_.fill(nullptr);
+            writeIndex_ = 0;
+            count_ = 0;
+        }
+
+        uint32_t Count() const { return count_; }
+
+    private:
+        std::array<IDirect3DBaseTexture8*, Capacity> entries_{};
+        uint32_t writeIndex_{0};
+        uint32_t count_{0};
+    };
+
+    void** gDecalDeviceVtable = nullptr;
+    DecalResetFn gDecalOriginalReset = nullptr;
+    DecalSetTextureFn gDecalOriginalSetTexture = nullptr;
+    DecalDrawPrimitiveFn gDecalOriginalDrawPrimitive = nullptr;
+    DecalDrawIndexedPrimitiveFn gDecalOriginalDrawIndexedPrimitive = nullptr;
+    DecalPresentFn gDecalOriginalPresent = nullptr;
+    thread_local bool gDecalInsideReset = false;
+    thread_local bool gDecalInsideSetTexture = false;
+    thread_local bool gDecalInsideDrawPrimitive = false;
+    thread_local bool gDecalInsideDrawIndexedPrimitive = false;
+    thread_local bool gDecalInsidePresent = false;
+
+    // Real GetTransform/SetTransform, grabbed straight from the vtable,
+    // never hooked - only ever called ourselves around a matched draw, not
+    // to observe the game's own calls to them.
+    DecalGetTransformFn gDecalRealGetTransform = nullptr;
+    DecalSetTransformFn gDecalRealSetTransform = nullptr;
+
+    // Whatever's currently bound to texture stages 0 and 1, tracked
+    // passively from the SetTexture hook after forwarding to original.
+    IDirect3DBaseTexture8* gDecalStage0Texture = nullptr;
+    IDirect3DBaseTexture8* gDecalStage1Texture = nullptr;
+
+    DecalTextureIdentityCache<kDecalTextureCacheCapacity> gDecalKnownDecalTextures;
+    DecalTextureIdentityCache<kDecalTextureCacheCapacity> gDecalKnownNonDecalTextures;
+
+    uint64_t gDecalFrame = 0;
+    uint64_t gDecalMatchedDrawCount = 0;
+    uint64_t gDecalTextureIdentifyAttempts = 0;
+    FILE* gDecalLogFile = nullptr;
+    uint64_t gDecalLogBytesWritten = 0;
+
+    void ensure_decal_log_open()
+    {
+        if (gDecalLogFile != nullptr)
+            return;
+        const auto dir = module_directory() + "logs\\dagnyfix\\";
+        ::CreateDirectoryA((module_directory() + "logs").c_str(), nullptr);
+        ::CreateDirectoryA(dir.c_str(), nullptr);
+        gDecalLogFile = std::fopen((dir + "dagnyfix_decal.log").c_str(), "a");
+    }
+
+    void decal_log_line(const std::string& line)
+    {
+        ensure_decal_log_open();
+        if (gDecalLogFile == nullptr || gDecalLogBytesWritten >= kDecalMaxLogBytes)
+            return;
+        const auto now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        char stamp[32]{};
+        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &local);
+        const auto full = std::string(stamp) + " | " + line + "\n";
+        std::fwrite(full.data(), 1, full.size(), gDecalLogFile);
+        std::fflush(gDecalLogFile);
+        gDecalLogBytesWritten += full.size();
+    }
+
+    // Cheap pointer-identity checks only - caller is expected to have
+    // already bailed if this returns Unknown (see decal_identify_texture_
+    // if_needed, which is what actually runs the expensive path below).
+    enum class DecalTextureClass { Unknown, Decal, NotDecal };
+
+    DecalTextureClass decal_classify_known_texture(IDirect3DBaseTexture8* texture)
+    {
+        if (texture == nullptr)
+            return DecalTextureClass::NotDecal;
+        if (gDecalKnownDecalTextures.Contains(texture))
+            return DecalTextureClass::Decal;
+        if (gDecalKnownNonDecalTextures.Contains(texture))
+            return DecalTextureClass::NotDecal;
+        return DecalTextureClass::Unknown;
+    }
+
+    // Only ever called for a texture decal_classify_known_texture just said
+    // it doesn't recognize yet. Checks GetType() before touching any
+    // IDirect3DTexture8-specific method - a cube or volume texture bound to
+    // the same stage would otherwise get GetLevelDesc called against the
+    // wrong vtable slots entirely.
+    void decal_identify_unknown_texture(IDirect3DBaseTexture8* texture)
+    {
+        ++gDecalTextureIdentifyAttempts;
+
+        if (texture->GetType() != D3DRTYPE_TEXTURE)
+        {
+            gDecalKnownNonDecalTextures.Add(texture);
+            return;
+        }
+
+        auto* texture2d = static_cast<IDirect3DTexture8*>(texture);
+        D3DSURFACE_DESC desc{};
+        if (FAILED(texture2d->GetLevelDesc(0, &desc)))
+        {
+            gDecalKnownNonDecalTextures.Add(texture);
+            return;
+        }
+
+        const bool looksLikeDecal = desc.Width <= kDecalMaxTextureDimension
+            && desc.Height <= kDecalMaxTextureDimension
+            && desc.Format == D3DFMT_DXT3;
+
+        if (looksLikeDecal)
+            gDecalKnownDecalTextures.Add(texture);
+        else
+            gDecalKnownNonDecalTextures.Add(texture);
+    }
+
+    // Called on every candidate draw. Deliberately checks the cheap cache
+    // lookup BEFORE ever reading the VIEW matrix - the overwhelming
+    // majority of draws in a real frame use a texture already classified
+    // one way or the other, and should never pay for a GetTransform call
+    // plus a seven-way signature comparison just to find that out again.
+    void decal_identify_texture_if_needed(IDirect3DDevice8* device, D3DMATRIX* viewScratch, bool* viewScratchValid)
+    {
+        if (decal_classify_known_texture(gDecalStage0Texture) != DecalTextureClass::Unknown)
+            return;
+
+        if (!*viewScratchValid)
+        {
+            if (gDecalRealGetTransform == nullptr
+                || FAILED(gDecalRealGetTransform(device, D3DTS_VIEW, viewScratch))
+                || !decal_matches_view_signature(*viewScratch))
+                return;
+            *viewScratchValid = true;
+        }
+        else if (!decal_matches_view_signature(*viewScratch))
+        {
+            return;
+        }
+
+        decal_identify_unknown_texture(gDecalStage0Texture);
+    }
+
+    struct DecalWorldSave
+    {
+        bool applied{false};
+        D3DMATRIX matrix{};
+    };
+
+    // Scales the upper-left 3x3 block of the current WORLD matrix: uniformly
+    // by kDecalUniformScale * (kDecalFovReferenceProjScale / proj[5]) to
+    // cancel the FOV-tracking bug (proj[5] = cot(fovY/2) is the standard
+    // aspect-independent term perspective projection scales screen size by,
+    // so this re-derives the size-vs-zoom relationship the decal's fixed
+    // pipeline skips), and on top of that scales world-X specifically by an
+    // extra proj[5]/proj[0] to cancel the aspect squish. That second factor
+    // only applies under the decal VIEW - the same decal textures also turn
+    // up on ordinary vertical quads (rising light pillars) drawn under the
+    // scene's normal VIEW, where the aspect correction would be wrong.
+    void decal_apply_world_scale(IDirect3DDevice8* device, DecalWorldSave& save)
+    {
+        if (gDecalRealGetTransform == nullptr || gDecalRealSetTransform == nullptr)
+            return;
+        if (FAILED(gDecalRealGetTransform(device, D3DTS_WORLD, &save.matrix)))
+            return;
+
+        float uniformScale = kDecalUniformScale;
+        float extraXScale = 1.0F;
+
+        if (kDecalFovReferenceProjScale > 0.0F)
+        {
+            D3DMATRIX projection{};
+            if (SUCCEEDED(gDecalRealGetTransform(device, D3DTS_PROJECTION, &projection)) && projection._22 > 0.0001F)
+            {
+                uniformScale = kDecalUniformScale * (kDecalFovReferenceProjScale / projection._22);
+
+                if (projection._11 > 0.0001F)
+                {
+                    D3DMATRIX view{};
+                    if (SUCCEEDED(gDecalRealGetTransform(device, D3DTS_VIEW, &view)) && decal_matches_view_signature(view))
+                        extraXScale = projection._22 / projection._11;
+                }
+            }
+        }
+
+        D3DMATRIX scaled = save.matrix;
+        scaled._11 *= uniformScale * extraXScale;
+        scaled._12 *= uniformScale;
+        scaled._13 *= uniformScale;
+        scaled._21 *= uniformScale * extraXScale;
+        scaled._22 *= uniformScale;
+        scaled._23 *= uniformScale;
+        scaled._31 *= uniformScale * extraXScale;
+        scaled._32 *= uniformScale;
+        scaled._33 *= uniformScale;
+
+        gDecalRealSetTransform(device, D3DTS_WORLD, &scaled);
+        save.applied = true;
+    }
+
+    void decal_restore_world(IDirect3DDevice8* device, const DecalWorldSave& save)
+    {
+        if (!save.applied || gDecalRealSetTransform == nullptr)
+            return;
+        gDecalRealSetTransform(device, D3DTS_WORLD, &save.matrix);
+    }
+
+    bool decal_current_draw_targets_decal()
+    {
+        return decal_classify_known_texture(gDecalStage0Texture) == DecalTextureClass::Decal
+            || decal_classify_known_texture(gDecalStage1Texture) == DecalTextureClass::Decal;
+    }
+
+    void decal_log_match(const char* drawKind)
+    {
+        ++gDecalMatchedDrawCount;
+        if (gDecalMatchedDrawCount <= kDecalLogEveryMatchUpTo || (gDecalMatchedDrawCount % kDecalLogEveryNthMatchAfter) == 0)
+        {
+            decal_log_line(
+                std::string("frame=") + std::to_string(gDecalFrame) + " decal draw (" + drawKind
+                + ") WORLD rescaled for this draw only, matched_draw_count=" + std::to_string(gDecalMatchedDrawCount)
+                + " known_decal_textures=" + std::to_string(gDecalKnownDecalTextures.Count())
+                + " known_non_decal_textures=" + std::to_string(gDecalKnownNonDecalTextures.Count()));
+        }
+    }
+
+    // Chains through whatever was previously in the SetTexture slot - the
+    // aura fix's own hook, per the attach order in hook_create_device below.
+    HRESULT __stdcall hook_decal_set_texture(IDirect3DDevice8* self, DWORD stage, IDirect3DBaseTexture8* texture)
+    {
+        const auto original = gDecalOriginalSetTexture;
+        if (gDecalInsideSetTexture || original == nullptr)
+            return original != nullptr ? original(self, stage, texture) : D3DERR_INVALIDCALL;
+        gDecalInsideSetTexture = true;
+        const auto result = original(self, stage, texture);
+        gDecalInsideSetTexture = false;
+
+        if (stage == 0)
+            gDecalStage0Texture = texture;
+        else if (stage == 1)
+            gDecalStage1Texture = texture;
+
+        return result;
+    }
+
+    // Chains through whatever was previously in the DrawPrimitive slot -
+    // the flare fix's own hook, per the attach order in hook_create_device
+    // below. Safe regardless of whether that inner hook ends up calling the
+    // real DrawPrimitive or bypassing to DrawPrimitiveUP for a matched glow
+    // billboard (see header note): WORLD is device state, held open for the
+    // whole call either way.
+    HRESULT __stdcall hook_decal_draw_primitive(
+        IDirect3DDevice8* self, D3DPRIMITIVETYPE primitiveType, UINT startVertex, UINT primitiveCount)
+    {
+        const auto original = gDecalOriginalDrawPrimitive;
+        if (gDecalInsideDrawPrimitive || original == nullptr)
+            return original != nullptr ? original(self, primitiveType, startVertex, primitiveCount) : D3DERR_INVALIDCALL;
+        gDecalInsideDrawPrimitive = true;
+
+        D3DMATRIX viewScratch{};
+        bool viewScratchValid = false;
+        decal_identify_texture_if_needed(self, &viewScratch, &viewScratchValid);
+
+        DecalWorldSave save;
+        const bool matched = decal_current_draw_targets_decal();
+        if (matched)
+            decal_apply_world_scale(self, save);
+
+        const auto result = original(self, primitiveType, startVertex, primitiveCount);
+
+        if (matched)
+        {
+            decal_restore_world(self, save);
+            decal_log_match("DrawPrimitive");
+        }
+
+        gDecalInsideDrawPrimitive = false;
+        return result;
+    }
+
+    // Exclusively ours - no other fix hooks this slot.
+    HRESULT __stdcall hook_decal_draw_indexed_primitive(
+        IDirect3DDevice8* self, D3DPRIMITIVETYPE primitiveType, UINT minIndex, UINT numVertices,
+        UINT startIndex, UINT primitiveCount)
+    {
+        const auto original = gDecalOriginalDrawIndexedPrimitive;
+        if (gDecalInsideDrawIndexedPrimitive || original == nullptr)
+        {
+            return original != nullptr
+                ? original(self, primitiveType, minIndex, numVertices, startIndex, primitiveCount)
+                : D3DERR_INVALIDCALL;
+        }
+        gDecalInsideDrawIndexedPrimitive = true;
+
+        D3DMATRIX viewScratch{};
+        bool viewScratchValid = false;
+        decal_identify_texture_if_needed(self, &viewScratch, &viewScratchValid);
+
+        DecalWorldSave save;
+        const bool matched = decal_current_draw_targets_decal();
+        if (matched)
+            decal_apply_world_scale(self, save);
+
+        const auto result = original(self, primitiveType, minIndex, numVertices, startIndex, primitiveCount);
+
+        if (matched)
+        {
+            decal_restore_world(self, save);
+            decal_log_match("DrawIndexedPrimitive");
+        }
+
+        gDecalInsideDrawIndexedPrimitive = false;
+        return result;
+    }
+
+    // Exclusively ours - no other fix hooks this slot.
+    HRESULT __stdcall hook_decal_reset(IDirect3DDevice8* self, D3DPRESENT_PARAMETERS* presentationParameters)
+    {
+        const auto original = gDecalOriginalReset;
+        if (gDecalInsideReset || original == nullptr)
+            return original != nullptr ? original(self, presentationParameters) : D3DERR_INVALIDCALL;
+        gDecalInsideReset = true;
+        const auto result = original(self, presentationParameters);
+        gDecalInsideReset = false;
+
+        // D3DPOOL_DEFAULT texture pointers are invalidated across a Reset,
+        // which correlates closely with zone changes and resolution
+        // switches in this game. A stale cache entry after this point would
+        // scale whatever unrelated texture the game recycles that address
+        // for next.
+        gDecalKnownDecalTextures.Clear();
+        gDecalKnownNonDecalTextures.Clear();
+        gDecalStage0Texture = nullptr;
+        gDecalStage1Texture = nullptr;
+        decal_log_line("device Reset: texture identity caches cleared");
+
+        return result;
+    }
+
+    // Chains through whatever was previously in the Present slot - by this
+    // point in the attach order, that's the aura fix's hook, which itself
+    // chains to the flare fix's hook, which chains to the real Present.
+    HRESULT __stdcall hook_decal_present(
+        IDirect3DDevice8* self, const RECT* sourceRect, const RECT* destRect, HWND destWindow, const RGNDATA* dirtyRegion)
+    {
+        const auto original = gDecalOriginalPresent;
+        if (gDecalInsidePresent || original == nullptr)
+            return original != nullptr ? original(self, sourceRect, destRect, destWindow, dirtyRegion) : D3DERR_INVALIDCALL;
+        gDecalInsidePresent = true;
+        const auto result = original(self, sourceRect, destRect, destWindow, dirtyRegion);
+        gDecalInsidePresent = false;
+
+        ++gDecalFrame;
+        if (gDecalFrame % kDecalStatusLineEveryNFrames == 0)
+        {
+            decal_log_line(
+                "status[periodic] frames=" + std::to_string(gDecalFrame)
+                + " matched_draw_count=" + std::to_string(gDecalMatchedDrawCount)
+                + " texture_identify_attempts=" + std::to_string(gDecalTextureIdentifyAttempts)
+                + " known_decal_textures=" + std::to_string(gDecalKnownDecalTextures.Count())
+                + " known_non_decal_textures=" + std::to_string(gDecalKnownNonDecalTextures.Count()));
+        }
+        return result;
+    }
+
+    // Must run after WindowerCore::attach_device() and attach_flare_hooks()
+    // - hook_create_device below enforces the order (see header note on the
+    // SetTexture/DrawPrimitive chains).
+    void attach_decal_hooks(IDirect3DDevice8* device)
+    {
+        auto*** object = reinterpret_cast<void***>(device);
+        if (object == nullptr || *object == nullptr)
+            return;
+        gDecalDeviceVtable = *object;
+
+        const auto hookOne = [](void** vtable, uint32_t slotIndex, void* hook, void** originalStorageAsVoidPtr) {
+            auto* slot = &vtable[slotIndex];
+            const auto previous = *slot;
+            if (previous == hook)
+                return; // already hooked (second CreateDevice call)
+            *originalStorageAsVoidPtr = previous;
+            write_vtable_slot(slot, hook);
+        };
+
+        hookOne(gDecalDeviceVtable, kDecalResetSlot, reinterpret_cast<void*>(&hook_decal_reset),
+            reinterpret_cast<void**>(&gDecalOriginalReset));
+        hookOne(gDecalDeviceVtable, kDecalSetTextureSlot, reinterpret_cast<void*>(&hook_decal_set_texture),
+            reinterpret_cast<void**>(&gDecalOriginalSetTexture));
+        hookOne(gDecalDeviceVtable, kDecalDrawPrimitiveSlot, reinterpret_cast<void*>(&hook_decal_draw_primitive),
+            reinterpret_cast<void**>(&gDecalOriginalDrawPrimitive));
+        hookOne(gDecalDeviceVtable, kDecalDrawIndexedPrimitiveSlot, reinterpret_cast<void*>(&hook_decal_draw_indexed_primitive),
+            reinterpret_cast<void**>(&gDecalOriginalDrawIndexedPrimitive));
+        hookOne(gDecalDeviceVtable, kDecalPresentSlot, reinterpret_cast<void*>(&hook_decal_present),
+            reinterpret_cast<void**>(&gDecalOriginalPresent));
+
+        // Not hooks - just grab the real pointers once so
+        // decal_apply_world_scale can call them directly for a matched draw.
+        gDecalRealGetTransform = reinterpret_cast<DecalGetTransformFn>(gDecalDeviceVtable[kDecalGetTransformSlot]);
+        gDecalRealSetTransform = reinterpret_cast<DecalSetTransformFn>(gDecalDeviceVtable[kDecalSetTransformSlot]);
+
+        decal_log_line(
+            "Dagnyfix decal fix attached to device; draws whose bound stage-0/1 texture is confirmed a "
+            "ground-decal texture (<=" + std::to_string(kDecalMaxTextureDimension) + "px, DXT3, seen under the "
+            "canonical top-down decal VIEW) get their WORLD matrix rescaled for that draw only - FOV-cancel ref="
+            + std::to_string(kDecalFovReferenceProjScale) + ", cleared on every device Reset. See "
+            "dagnyfix/README.md for how this coexists with the other two fixes' hooks in this merged build.");
+    }
+
+    // =====================================================================
+    // CreateDevice hook - hands the real device to all three fixes, in order.
     // =====================================================================
 
     HRESULT __stdcall hook_create_device(
@@ -510,12 +1074,13 @@ namespace
         if (SUCCEEDED(result) && returnedDeviceInterface != nullptr && *returnedDeviceInterface != nullptr)
         {
             // Order matters (see header note). Each attach is guarded so
-            // one fix failing can't take down device creation or the other fix.
+            // one fix failing can't take down device creation or the other fixes.
             try { attach_flare_hooks(*returnedDeviceInterface); } catch (...) {}
             if (gCore != nullptr)
             {
                 try { gCore->attach_device(*returnedDeviceInterface); } catch (...) {}
             }
+            try { attach_decal_hooks(*returnedDeviceInterface); } catch (...) {}
         }
         return result;
     }
@@ -547,7 +1112,7 @@ extern "C" IDirect3D8* WINAPI Direct3DCreate8(UINT sdkVersion)
 {
     if (!load_real_backend())
         return nullptr;
-    flare_log_line("=== Dagnyfix proxy loaded (aura fix + flare fix v3.1) ===");
+    flare_log_line("=== Dagnyfix proxy loaded (aura fix + flare fix v3.1 + decal fix) ===");
     ensure_core_initialized();
 
     const auto real = gRealDirect3DCreate8(sdkVersion);
@@ -602,6 +1167,11 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
             {
                 std::fclose(gFlareLogFile);
                 gFlareLogFile = nullptr;
+            }
+            if (gDecalLogFile != nullptr)
+            {
+                std::fclose(gDecalLogFile);
+                gDecalLogFile = nullptr;
             }
             if (gRealModule != nullptr)
             {
