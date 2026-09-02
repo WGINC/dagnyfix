@@ -50,7 +50,7 @@ Each folder has its own README with the deeper technical detail and investigatio
 
 ## Credits
 
-Built on top of [Ashita](https://ashitaxi.com/), the addon/plugin framework this all runs on - created by RZN, currently maintained by atom0s, with Thorny (Lolwutt) as a core contributor - and Krauerlabs's original SpectralFix, the aura fix this project extends to Windower and builds on. The ground-decal fix's core technique (matching a decal draw by its VIEW matrix, then temporarily rescaling WORLD around it) is ported and hardened from an earlier prototype fix; see `decalfix/README.md` if you know who wrote it and want them credited by name.
+Built on top of [Ashita](https://ashitaxi.com/), the addon/plugin framework this all runs on - created by RZN, currently maintained by atom0s, with Thorny (Lolwutt) as a core contributor - and Krauerlabs's original SpectralFix, the aura fix this project extends to Windower and builds on. The ground-decal fix's core technique (matching a decal draw by its VIEW matrix, then temporarily rescaling WORLD around it) is ported and hardened from an earlier prototype by **Daleterrence** on the FFXIAH forums, who has spent years cataloging FFXI's PC-client graphical bugs and provided the decalfix prototype this fix is built on; see `decalfix/README.md` for more.
 
 By Dellingr.
 

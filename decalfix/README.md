@@ -13,6 +13,10 @@ not because the underlying bugs are related. Evaluate and merge each
 independently -- this fix is also merged into `../dagnyfix/`, the combined
 production build.
 
+Credit to **Daleterrence** on the FFXIAH forums, who has spent years
+cataloging FFXI's PC-client graphical bugs -- this one included -- and wrote
+the original decalfix prototype this rewrite is ported and hardened from.
+
 ## Root cause
 
 These decals are drawn with a fixed, canonical top-down VIEW matrix combined
@@ -106,10 +110,10 @@ own conventions, not a port of its code:
 - Assumes decals are drawn under vtable slot `D3DTS_WORLDMATRIX(0)`
   (`WORLD0`), matching every other transform assumption already used
   elsewhere in this project.
-- The header currently credits the original prototype's author only as
-  "whoever wrote the earlier prototype this fix is ported and hardened
-  from" -- if you know who that is and want them named specifically, say so
-  and it'll be updated.
+- The prototype this fix is ported and hardened from is credited to
+  **Daleterrence** on the FFXIAH forums, who has cataloged FFXI's PC-client
+  graphical bugs (this one included) for years and wrote the original
+  decalfix prototype this rewrite is built on.
 
 ## Build
 
