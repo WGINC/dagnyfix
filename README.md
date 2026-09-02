@@ -2,9 +2,9 @@
 
 A `d3d8.dll` proxy for FFXI on Windower 4 that fixes three unrelated rendering bugs:
 
-- **Aura aliasing** — actor auras render jagged instead of smooth. Ported from SpectralFix, the original Ashita plugin this project is built on.
-- **Flare depth-sorting** — distant light-source flares (lamps, lanterns) render behind their housing instead of in front of it, flickering between correct and incorrect.
-- **Ground-decal aspect/zoom** — ground-effect decals (avatar summoning pentagrams, ground-targeted spell circles, certain NPC ground effects) render at the wrong size and aspect ratio: stretched into an ellipse on non-square displays, and swelling or shrinking as the camera zooms instead of holding still on the ground.
+- **Aura aliasing** - actor auras render jagged instead of smooth. Ported from SpectralFix, the original Ashita plugin this project is built on.
+- **Flare depth-sorting** - distant light-source flares (lamps, lanterns) render behind their housing instead of in front of it, flickering between correct and incorrect.
+- **Ground-decal aspect/zoom** - ground-effect decals (avatar summoning pentagrams, ground-targeted spell circles, certain NPC ground effects) render at the wrong size and aspect ratio: stretched into an ellipse on non-square displays, and swelling or shrinking as the camera zooms instead of holding still on the ground.
 
 All three fixes are merged into a single DLL because the game only has one `d3d8.dll` slot to fill.
 
@@ -39,19 +39,18 @@ on the machine it runs on.
 
 ## Repo layout
 
-- `dagnyfix/` — the production build: all three fixes merged into one proxy DLL. Start here.
-- `windower/` — the aura fix on its own, ported from the original Ashita plugin.
-- `flarefix/` — the flare fix on its own, plus its own build/install notes.
-- `decalfix/` — the ground-decal fix on its own, plus its own build/install notes and open items.
-- `diagnostics/` — the diagnostic tool used to track down the flare bug's root cause.
-- `src/` — shared, framework-agnostic logic used by more than one of the above.
+- `dagnyfix/` - the production build: all three fixes merged into one proxy DLL. Start here.
+- `windower/` - the aura fix on its own, ported from the original Ashita plugin.
+- `flarefix/` - the flare fix on its own, plus its own build/install notes.
+- `decalfix/` - the ground-decal fix on its own, plus its own build/install notes and open items.
+- `diagnostics/` - the diagnostic tool used to track down the flare bug's root cause.
+- `src/` - shared, framework-agnostic logic used by more than one of the above.
 
 Each folder has its own README with the deeper technical detail and investigation history.
 
 ## Credits
 
-Built on top of [Ashita](https://ashitaxi.com/), the addon/plugin framework this all runs on — created by RZN, currently maintained by atom0s, with Thorny (Lolwutt) as a core contributor — and Krauerlabs's original SpectralFix, the aura fix this project extends to Windower and builds on. The ground-decal fix's core technique (matching a decal draw by its VIEW matrix, then temporarily rescaling WORLD around it) is ported and hardened from an earlier prototype fix; see `decalfix/README.md` if you know who wrote it and want them credited by name.
->>>>>>> Stashed changes
+Built on top of [Ashita](https://ashitaxi.com/), the addon/plugin framework this all runs on - created by RZN, currently maintained by atom0s, with Thorny (Lolwutt) as a core contributor - and Krauerlabs's original SpectralFix, the aura fix this project extends to Windower and builds on. The ground-decal fix's core technique (matching a decal draw by its VIEW matrix, then temporarily rescaling WORLD around it) is ported and hardened from an earlier prototype fix; see `decalfix/README.md` if you know who wrote it and want them credited by name.
 
 By Dellingr.
 
