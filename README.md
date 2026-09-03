@@ -1,6 +1,6 @@
 # Dagnyfix
 
-A `d3d8.dll` proxy for FFXI on Windower 4 that fixes three unrelated rendering bugs:
+A `d3d8.dll` proxy for FFXI on Windower 4, Ashita, and vanilla that fixes three unrelated rendering bugs:
 
 - **Aura aliasing** - actor auras render jagged instead of smooth. Ported from SpectralFix, the original Ashita plugin this project is built on.
 - **Flare depth-sorting** - distant light-source flares (lamps, lanterns) render behind their housing instead of in front of it, flickering between correct and incorrect.
